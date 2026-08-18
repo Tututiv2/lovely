@@ -22,7 +22,7 @@ log = logs.get("settings")
 #: paste. One app registration serves every copy; each person authenticates as themselves.
 #:
 #: Leave empty for an unbranded build; Settings still accepts a per-machine override.
-DEFAULT_CLIENT_ID = ""
+DEFAULT_CLIENT_ID = "8dd9fdce-fb57-40f9-ad29-8ff28630e259"
 
 
 @dataclass
