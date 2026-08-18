@@ -20,7 +20,7 @@ from pathlib import Path
 #: The product name. Also the Azure app registration's display name -- the Minecraft AppID
 #: review cross-references the two, so they must not drift apart.
 APP_NAME = "Lovely"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 # The launcher package lives at <root>/launcher/paths.py
 PACKAGE_DIR = Path(__file__).resolve().parent

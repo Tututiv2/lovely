@@ -25,7 +25,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox
 
-from .. import libraries, logs, nbt, net
+from .. import libraries, logs, nbt, net, serverping, update
 from ..accounts import Account, AccountStore, AuthError, LocalAccount, dev_mode_enabled
 from ..instances import Instance, InstanceStore
 from ..launch import GameProcess, LaunchError, prepare, spawn
@@ -37,6 +37,7 @@ from . import skin, theme
 from .dialogs import (CreateInstanceDialog, EditInstanceDialog, SettingsDialog,
                       SignInDialog)
 from .home import HomeScreen
+from .modbrowser import ModBrowserDialog
 from .watchdog import (Watchdog, install_tk_error_handler,
                        redirect_stdio)
 
@@ -95,6 +96,8 @@ class App:
         self._main_thread = threading.current_thread()
         self._head_cache: dict[str, tk.PhotoImage] = {}
         self._cached_instances: list[Instance] = []
+        self.server_status = serverping.StatusCache()
+        self.updates = update.UpdateChecker()
 
         self.root = tk.Tk()
         self.root.title(f"{APP_NAME} {APP_VERSION}")
@@ -116,6 +119,9 @@ class App:
         self.reload_instances()
         self.show_home()
         log.info("launcher ready (%d instances)", len(self._cached_instances))
+        # Ambient, on a worker, never blocking startup: if GitHub is unreachable the
+        # launcher simply never mentions updates.
+        self._spawn_bg(self._check_for_update, name="update-check")
 
     # ================================================================== construction
     def _build(self) -> None:
@@ -165,6 +171,8 @@ class App:
         tk.Label(header, text=ck.spaced("INSTANCES"), bg=theme.PANEL, fg=theme.FAINT,
                  font=self.f["kicker"]).pack(side="left")
         theme.Button(header, "+ New", self.create_instance, kind="ghost",
+                     font=self.f["small"], padx=8, pady=2).pack(side="right")
+        theme.Button(header, "Import pack", self.import_modpack, kind="ghost",
                      font=self.f["small"], padx=8, pady=2).pack(side="right")
 
         self.list_outer, self.list_inner = theme.scrollable(left, theme.PANEL)
@@ -254,7 +262,8 @@ class App:
         actions = tk.Frame(self.detail, bg=theme.BG)
         actions.pack(fill="x")
         for label, fn in (("Edit", self.edit_instance),
-                          ("Mods", lambda: self.open_sub("mods")),
+                          ("Get mods", self.browse_mods),
+                          ("Mods folder", lambda: self.open_sub("mods")),
                           ("Saves", lambda: self.open_sub("saves")),
                           ("Logs", lambda: self.open_sub("logs")),
                           ("Open folder", lambda: self.open_sub("")),
@@ -326,6 +335,44 @@ class App:
             if current is not None:
                 return current
         return self._cached_instances[0] if self._cached_instances else None
+
+    def _spawn_bg(self, fn, *args, name: str = "bg") -> None:
+        """Fire-and-forget background work that must NOT block the UI or set `busy`.
+
+        Distinct from :meth:`_background`, which owns the progress bar and the cancel
+        button and refuses to run two jobs at once. Pings and update checks are ambient.
+        """
+        threading.Thread(target=fn, args=args, name=name, daemon=True).start()
+
+    def server_status_for(self, address: str):
+        """Cached status, kicking off a refresh when it is missing or stale."""
+        if not address:
+            return None
+        if self.server_status.is_stale(address) and self.server_status.claim(address):
+            self._spawn_bg(self._ping_server, address, name="ping")
+        return self.server_status.get(address)
+
+    def _ping_server(self, address: str) -> None:
+        try:
+            status = serverping.ping(address)
+        except Exception:
+            self.server_status.release(address)
+            return
+        self.server_status.put(address, status)
+        self._on_ui(lambda: self.home.set_server_status(address, status))
+
+    def _check_for_update(self) -> None:
+        if not self.updates.due:
+            return
+        if self.updates.run() is not None:
+            self._on_ui(self.refresh_current_screen)
+
+    def open_release_page(self) -> None:
+        update.open_release_page(self.updates.release)
+
+    def dismiss_update(self) -> None:
+        self.updates.dismissed = True
+        self.refresh_current_screen()
 
     def is_running(self, slug: str) -> bool:
         proc = self.running.get(slug)
@@ -580,6 +627,34 @@ class App:
         dlg = EditInstanceDialog(self.root, self, self.selected)
         self.root.wait_window(dlg.top)
         self.selected = self.instances.get(self.selected.slug)
+        self.refresh_current_screen()
+
+    def import_modpack(self) -> None:
+        """Install a Modrinth .mrpack as a complete new instance."""
+        path = filedialog.askopenfilename(
+            title="Import a Modrinth modpack",
+            filetypes=[("Modrinth modpack", "*.mrpack"), ("All files", "*.*")])
+        if not path:
+            return
+        self._background(self._do_import_pack, Path(path), label="import the pack")
+
+    def _do_import_pack(self, path: Path) -> None:
+        from ..mods import mrpack
+        progress = self._progress()
+        pack = mrpack.read_index(path)
+        self.console_write(
+            f"--- installing pack {pack.name} ({pack.mc_version} {pack.loader}, "
+            f"{len(pack.files)} files) ---", "launcher")
+        instance = mrpack.install(self.layout, path, memory_mb=self.settings.default_memory_mb,
+                                  progress=progress, cancel=self.cancel)
+        self._on_ui(lambda: self.open_library(instance))
+
+    def browse_mods(self) -> None:
+        """Search Modrinth and install straight into the selected instance."""
+        if self.selected is None:
+            return
+        dlg = ModBrowserDialog(self.root, self, self.selected)
+        self.root.wait_window(dlg.top)
         self.refresh_current_screen()
 
     def duplicate_instance(self) -> None:

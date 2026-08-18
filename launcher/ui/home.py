@@ -21,6 +21,8 @@ from __future__ import annotations
 import time
 import tkinter as tk
 
+import re
+
 from .. import logs
 from ..paths import APP_NAME
 from . import canvaskit as ck
@@ -30,6 +32,11 @@ log = logs.get("ui.home")
 
 PAD = 34
 MAX_CARDS = 8
+
+
+def status_tag(address: str) -> str:
+    """A canvas tag for one server's status text. Tk splits tags on whitespace."""
+    return "srv-" + re.sub(r"[^A-Za-z0-9]", "_", address or "")
 
 
 class HomeScreen:
@@ -104,6 +111,7 @@ class HomeScreen:
 
         self._paint_backdrop(w, h)
         self._paint_header(w)
+        self._paint_update_banner(w)
         grid_top = self._paint_hero(w, h)
         grid_bottom = self._paint_grid(w, h, grid_top)
         self._paint_runtime_strip(w, h, grid_bottom)
@@ -180,12 +188,46 @@ class HomeScreen:
         panel.add(cv.create_text(x + 50, y + 33, text=sub, anchor="w", fill=tint,
                                  font=self.f["tiny"]))
 
+    def _paint_update_banner(self, w: int) -> None:
+        """A quiet strip above the hero when a newer release exists. Dismissible.
+
+        Notify-only by design: a running .exe cannot replace itself on Windows without a
+        helper process that deletes and overwrites the binary that spawned it, which looks
+        exactly like malware to antivirus and to the user.
+        """
+        app = self.app
+        if not getattr(app, "updates", None) or not app.updates.should_show:
+            self.banner_height = 0
+            return
+        release = app.updates.release
+        self.banner_height = 44
+
+        x, y = PAD, 96
+        bw = w - PAD * 2
+        panel = ck.Panel(cv := self.cv, x, y, bw, 36,
+                         fill=ck.mix(theme.PANEL, theme.ACCENT, 0.10),
+                         hover_fill=ck.mix(theme.PANEL_HI, theme.ACCENT, 0.14),
+                         outline=ck.mix(theme.BORDER, theme.ACCENT, 0.35),
+                         hover_outline=theme.ACCENT, radius=10,
+                         accent=theme.ACCENT_HI, on_click=app.open_release_page)
+        self.widgets.append(panel)
+        panel.add(cv.create_text(x + 16, y + 18, anchor="w", fill=theme.ACCENT,
+                                 font=self.f["kicker"], text=ck.spaced("UPDATE")))
+        panel.add(cv.create_text(
+            x + 86, y + 18, anchor="w", fill=theme.TEXT, font=self.f["small"],
+            text=f"{release.headline}  —  click to open the download page"))
+
+        self.widgets.append(ck.Button(
+            cv, x + bw - 82, y + 6, 68, 24, text="Dismiss", font=self.f["tiny"],
+            on_click=app.dismiss_update, fill=ck.mix(theme.PANEL, theme.ACCENT, 0.06),
+            hover=theme.PANEL_HI, text_colour=theme.DIM, radius=7))
+
     def _paint_hero(self, w: int, h: int) -> float:
         """The Continue card. Returns the y at which the grid may start."""
         cv = self.cv
         app = self.app
         inst = app.hero_instance()
-        x1, y1 = PAD, 108
+        x1, y1 = PAD, 108 + getattr(self, "banner_height", 0)
         card_w = w - PAD * 2
         card_h = 148
 
@@ -237,6 +279,13 @@ class HomeScreen:
         panel.add(cv.create_text(x1 + 30, y1 + 116, anchor="w",
                                  text=app.last_played_text(inst), fill=theme.FAINT,
                                  font=self.f["tiny"]))
+        if inst.quick_play_server:
+            # Live server state, filled in when the ping lands (see set_server_status).
+            status = app.server_status_for(inst.quick_play_server)
+            panel.add(cv.create_text(
+                x1 + 150, y1 + 116, anchor="w", text=self._status_text(status),
+                fill=theme.OK if (status and status.online) else theme.FAINT,
+                font=self.f["tiny"], tags=status_tag(inst.quick_play_server)))
 
         play_w, play_h = 176, 52
         px = x1 + card_w - play_w - 26
@@ -388,11 +437,19 @@ class HomeScreen:
         panel.add(cv.create_text(x + 70, y + 46, anchor="w", fill=theme.DIM,
                                  font=self.f["tiny"],
                                  text=f"{inst.loader.title()}  ·  {inst.memory_mb} MB"))
-        panel.add(cv.create_text(x + 70, y + 64, anchor="w",
-                                 text="running now" if running
-                                 else app.last_played_text(inst),
+        line = "running now" if running else app.last_played_text(inst)
+        panel.add(cv.create_text(x + 70, y + 64, anchor="w", text=line,
                                  fill=theme.OK if running else theme.FAINT,
                                  font=self.f["tiny"]))
+        if inst.quick_play_server:
+            status = app.server_status_for(inst.quick_play_server)
+            offset = self.f["tiny"].measure(line) + 12
+            panel.add(cv.create_text(
+                x + 70 + offset, y + 64, anchor="w",
+                text=self._status_text(status, compact=True),
+                fill=theme.OK if (status and status.online) else theme.FAINT,
+                font=self.f["tiny"],
+                tags=(status_tag(inst.quick_play_server), "srv-compact")))
         if running:
             panel.add(cv.create_oval(x + w - 20, y + 15, x + w - 13, y + 22,
                                      fill=theme.OK, width=0))
@@ -405,6 +462,7 @@ class HomeScreen:
 
         buttons = [
             ("Library", app.open_library, 96),
+            ("Import pack", app.import_modpack, 112),
             ("Settings", app.open_settings, 92),
             ("Accounts", app.open_accounts, 96),
             ("Folder", app.open_data_folder, 84),
@@ -422,6 +480,26 @@ class HomeScreen:
                                           font=self.f["tiny"])
 
     # ------------------------------------------------------------------ updates
+    def set_server_status(self, address: str, status) -> None:
+        """Fill in one server's line once its ping lands, without a full repaint."""
+        tag = status_tag(address)
+        colour = theme.OK if status.online else theme.FAINT
+        try:
+            compact = set(self.cv.find_withtag("srv-compact"))
+            for item in self.cv.find_withtag(tag):
+                self.cv.itemconfigure(
+                    item, fill=colour,
+                    text=self._status_text(status, compact=item in compact))
+        except tk.TclError:
+            pass
+
+    @staticmethod
+    def _status_text(status, compact: bool = False) -> str:
+        if status is None:
+            return "checking..." if compact else "checking server..."
+        label = status.compact if compact else status.summary
+        return ("●  " if status.online else "○  ") + label
+
     def set_status(self, text: str) -> None:
         item = getattr(self, "status_item", None)
         if item is not None:
