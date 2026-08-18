@@ -39,6 +39,20 @@ else:
     ROOT = PACKAGE_DIR.parent
 
 
+def resource(*parts: str) -> Path:
+    """Locate a non-code file that ships with the app.
+
+    A frozen build unpacks its bundled data into ``sys._MEIPASS``, which is nowhere near
+    the executable, so resources and the data root resolve from two different places and
+    must not share a helper.
+    """
+    if FROZEN:
+        base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    else:
+        base = PACKAGE_DIR.parent
+    return base.joinpath(*parts)
+
+
 def _default_data_root() -> Path:
     override = os.environ.get("MYFIRE_DATA_ROOT")
     if override:

@@ -65,6 +65,17 @@ def _dark_titlebar(window: tk.Misc) -> None:
         log.debug("dark title bar unavailable", exc_info=True)
 
 
+def _set_window_icon(window: tk.Misc) -> None:
+    """Taskbar and title-bar icon. Cosmetic, so never fatal if the file is missing."""
+    try:
+        from ..paths import resource
+        ico = resource("launcher", "ui", "icon.ico")
+        if ico.is_file():
+            window.iconbitmap(default=str(ico))
+    except Exception:
+        log.debug("window icon unavailable", exc_info=True)
+
+
 class App:
     def __init__(self, layout: Layout) -> None:
         self.layout = layout
@@ -91,6 +102,7 @@ class App:
         self.root.minsize(900, 620)
         self.root.configure(bg=theme.BG)
         _dark_titlebar(self.root)
+        _set_window_icon(self.root)
         self.f = theme.fonts()
 
         self._build()
